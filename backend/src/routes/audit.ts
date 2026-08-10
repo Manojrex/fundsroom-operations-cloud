@@ -1,0 +1,1 @@
+import {Router} from 'express';import {query} from '../db';import {auth} from '../middleware/auth';const r=Router();r.use(auth);r.get('/',async(_req,res,next)=>{try{const x=await query(`SELECT a.*,u.name user_name,u.role FROM audit_logs a LEFT JOIN users u ON u.id=a.user_id ORDER BY a.id DESC LIMIT 100`);res.json(x.rows)}catch(e){next(e)}});export default r;
