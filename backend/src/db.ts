@@ -1,28 +1,76 @@
-import { Pool } from 'pg';
-import dotenv from 'dotenv';
-dotenv.config();
-export const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false });
-export async function query<T = any>(text: string, params: any[] = []) { return pool.query<T>(text, params); }
-export async function initDb() {
-  await query(`
-  CREATE TABLE IF NOT EXISTS users(id SERIAL PRIMARY KEY,name VARCHAR(100) NOT NULL,email VARCHAR(160) UNIQUE NOT NULL,password_hash TEXT NOT NULL,role VARCHAR(20) NOT NULL CHECK(role IN ('Admin','Sales','Warehouse','Accounts')),created_at TIMESTAMPTZ DEFAULT NOW());
-  CREATE TABLE IF NOT EXISTS customers(id SERIAL PRIMARY KEY,name VARCHAR(150) NOT NULL,mobile VARCHAR(30) NOT NULL,email VARCHAR(160),business_name VARCHAR(160) NOT NULL,gst_number VARCHAR(30),customer_type VARCHAR(30) NOT NULL CHECK(customer_type IN ('Retail','Wholesale','Distributor')),address TEXT,status VARCHAR(20) NOT NULL DEFAULT 'Lead' CHECK(status IN ('Lead','Active','Inactive')),follow_up_date DATE,notes TEXT,created_at TIMESTAMPTZ DEFAULT NOW());
-  CREATE TABLE IF NOT EXISTS products(id SERIAL PRIMARY KEY,name VARCHAR(160) NOT NULL,sku VARCHAR(80) UNIQUE NOT NULL,category VARCHAR(100) NOT NULL,unit_price NUMERIC(12,2) NOT NULL,current_stock INTEGER NOT NULL DEFAULT 0 CHECK(current_stock>=0),min_stock INTEGER NOT NULL DEFAULT 0 CHECK(min_stock>=0),warehouse VARCHAR(120) NOT NULL,created_at TIMESTAMPTZ DEFAULT NOW());
-  CREATE TABLE IF NOT EXISTS stock_movements(id SERIAL PRIMARY KEY,product_id INTEGER NOT NULL REFERENCES products(id),quantity INTEGER NOT NULL,movement_type VARCHAR(3) NOT NULL CHECK(movement_type IN ('IN','OUT','TRANSFER')),reason TEXT NOT NULL,created_by INTEGER REFERENCES users(id),created_at TIMESTAMPTZ DEFAULT NOW());
-  CREATE TABLE IF NOT EXISTS challans(id SERIAL PRIMARY KEY,challan_number VARCHAR(40) UNIQUE NOT NULL,customer_id INTEGER NOT NULL REFERENCES customers(id),total_quantity INTEGER NOT NULL DEFAULT 0,status VARCHAR(20) NOT NULL DEFAULT 'Draft' CHECK(status IN ('Draft','Confirmed','Cancelled')),created_by INTEGER REFERENCES users(id),created_at TIMESTAMPTZ DEFAULT NOW());
-  CREATE TABLE IF NOT EXISTS challan_items(id SERIAL PRIMARY KEY,challan_id INTEGER NOT NULL REFERENCES challans(id) ON DELETE CASCADE,product_id INTEGER REFERENCES products(id),product_name VARCHAR(160) NOT NULL,sku VARCHAR(80) NOT NULL,unit_price NUMERIC(12,2) NOT NULL,quantity INTEGER NOT NULL CHECK(quantity>0));
-  CREATE TABLE IF NOT EXISTS suppliers(id SERIAL PRIMARY KEY,name VARCHAR(160) NOT NULL,contact VARCHAR(30),email VARCHAR(160),gst_number VARCHAR(30),address TEXT,status VARCHAR(20) DEFAULT 'Active',created_at TIMESTAMPTZ DEFAULT NOW());
-  CREATE TABLE IF NOT EXISTS purchase_orders(id SERIAL PRIMARY KEY,po_number VARCHAR(40) UNIQUE NOT NULL,supplier_id INTEGER NOT NULL REFERENCES suppliers(id),status VARCHAR(30) NOT NULL DEFAULT 'Draft' CHECK(status IN ('Draft','Submitted','Approved','Partially Received','Received','Cancelled')),total NUMERIC(14,2) NOT NULL DEFAULT 0,created_by INTEGER REFERENCES users(id),created_at TIMESTAMPTZ DEFAULT NOW());
-  CREATE TABLE IF NOT EXISTS purchase_order_items(id SERIAL PRIMARY KEY,po_id INTEGER NOT NULL REFERENCES purchase_orders(id) ON DELETE CASCADE,product_id INTEGER NOT NULL REFERENCES products(id),product_name VARCHAR(160) NOT NULL,quantity INTEGER NOT NULL CHECK(quantity>0),received_quantity INTEGER NOT NULL DEFAULT 0,unit_price NUMERIC(12,2) NOT NULL);
-  CREATE TABLE IF NOT EXISTS goods_receipts(id SERIAL PRIMARY KEY,grn_number VARCHAR(40) UNIQUE NOT NULL,po_id INTEGER NOT NULL REFERENCES purchase_orders(id),created_by INTEGER REFERENCES users(id),created_at TIMESTAMPTZ DEFAULT NOW());
-  CREATE TABLE IF NOT EXISTS goods_receipt_items(id SERIAL PRIMARY KEY,grn_id INTEGER NOT NULL REFERENCES goods_receipts(id) ON DELETE CASCADE,po_item_id INTEGER NOT NULL REFERENCES purchase_order_items(id),product_id INTEGER NOT NULL REFERENCES products(id),quantity INTEGER NOT NULL CHECK(quantity>0));
-  CREATE TABLE IF NOT EXISTS invoices(id SERIAL PRIMARY KEY,invoice_number VARCHAR(40) UNIQUE NOT NULL,challan_id INTEGER REFERENCES challans(id),customer_id INTEGER NOT NULL REFERENCES customers(id),subtotal NUMERIC(14,2) NOT NULL DEFAULT 0,tax NUMERIC(14,2) NOT NULL DEFAULT 0,total NUMERIC(14,2) NOT NULL DEFAULT 0,status VARCHAR(20) DEFAULT 'Pending' CHECK(status IN ('Pending','Partially Paid','Paid','Cancelled')),created_at TIMESTAMPTZ DEFAULT NOW());
-  CREATE TABLE IF NOT EXISTS invoice_items(id SERIAL PRIMARY KEY,invoice_id INTEGER NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,product_id INTEGER REFERENCES products(id),product_name VARCHAR(160) NOT NULL,quantity INTEGER NOT NULL,unit_price NUMERIC(12,2) NOT NULL);
-  CREATE TABLE IF NOT EXISTS payments(id SERIAL PRIMARY KEY,invoice_id INTEGER NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,amount NUMERIC(14,2) NOT NULL CHECK(amount>0),method VARCHAR(30) NOT NULL,reference VARCHAR(100),created_by INTEGER REFERENCES users(id),created_at TIMESTAMPTZ DEFAULT NOW());
-  CREATE TABLE IF NOT EXISTS warehouses(id SERIAL PRIMARY KEY,name VARCHAR(120) UNIQUE NOT NULL,location VARCHAR(180),manager VARCHAR(120),created_at TIMESTAMPTZ DEFAULT NOW());
-  CREATE TABLE IF NOT EXISTS stock_transfers(id SERIAL PRIMARY KEY,transfer_number VARCHAR(40) UNIQUE NOT NULL,from_warehouse VARCHAR(120) NOT NULL,to_warehouse VARCHAR(120) NOT NULL,product_id INTEGER NOT NULL REFERENCES products(id),quantity INTEGER NOT NULL CHECK(quantity>0),status VARCHAR(20) DEFAULT 'Draft' CHECK(status IN ('Draft','In Transit','Completed','Cancelled')),created_by INTEGER REFERENCES users(id),created_at TIMESTAMPTZ DEFAULT NOW());
-  CREATE TABLE IF NOT EXISTS audit_logs(id SERIAL PRIMARY KEY,user_id INTEGER REFERENCES users(id),action VARCHAR(120) NOT NULL,entity VARCHAR(80) NOT NULL,entity_id VARCHAR(80),details TEXT,created_at TIMESTAMPTZ DEFAULT NOW());
-  CREATE INDEX IF NOT EXISTS idx_customers_search ON customers(name,business_name,mobile);
-  CREATE INDEX IF NOT EXISTS idx_stock_product ON stock_movements(product_id,created_at DESC);
-  `);
+import "dotenv/config";
+import { Pool, QueryResult, QueryResultRow } from "pg";
+
+const connectionString = process.env.DATABASE_URL;
+
+if (!connectionString) {
+  throw new Error("DATABASE_URL is not configured");
+}
+
+const isLocalDatabase =
+  connectionString.includes("localhost") ||
+  connectionString.includes("127.0.0.1");
+
+export const pool = new Pool({
+  connectionString,
+  max: 10,
+  idleTimeoutMillis: 30_000,
+  connectionTimeoutMillis: 10_000,
+  ssl: isLocalDatabase
+    ? false
+    : {
+        rejectUnauthorized: false,
+      },
+});
+
+pool.on("error", (err) => {
+  console.error("Unexpected PostgreSQL pool error:", err);
+});
+
+/**
+ * Execute a PostgreSQL query.
+ *
+ * Returns the complete QueryResult so existing routes can use:
+ *   result.rows
+ *   result.rowCount
+ *   result.command
+ */
+export async function query<
+  T extends QueryResultRow = QueryResultRow
+>(
+  text: string,
+  params?: unknown[]
+): Promise<QueryResult<T>> {
+  return pool.query<T>(text, params);
+}
+
+/**
+ * Initialize/check the database connection.
+ *
+ * The actual tables are already present in the PostgreSQL database,
+ * and seedDemoData() handles demo data.
+ */
+export async function initDb(): Promise<void> {
+  await pool.query("SELECT 1");
+  console.log("PostgreSQL database connected");
+}
+
+/**
+ * Check database connectivity.
+ */
+export async function checkDatabaseConnection(): Promise<boolean> {
+  try {
+    await pool.query("SELECT 1");
+    return true;
+  } catch (error) {
+    console.error("PostgreSQL connection failed:", error);
+    return false;
+  }
+}
+
+/**
+ * Gracefully close the connection pool.
+ */
+export async function closeDatabase(): Promise<void> {
+  await pool.end();
 }
