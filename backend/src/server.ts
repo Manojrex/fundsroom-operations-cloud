@@ -25,45 +25,39 @@ dotenv.config();
 const app = express();
 
 /*
-|--------------------------------------------------------------------------
-| CORS
-|--------------------------------------------------------------------------
-| Allow the local Vite frontend on both common development ports.
-| Also supports CORS_ORIGIN from environment variables for deployment.
-|--------------------------------------------------------------------------
-*/
+ * -------------------------------------------------------
+ * CORS CONFIGURATION
+ * -------------------------------------------------------
+ */
 
-const defaultOrigins = [
+const envOrigins = (process.env.CORS_ORIGIN || "")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+const allowedOrigins = new Set([
   "http://localhost:5173",
   "http://localhost:5174",
-];
-
-const configuredOrigins =
-  process.env.CORS_ORIGIN
-    ?.split(",")
-    .map((origin) => origin.trim())
-    .filter(Boolean) ?? [];
-
-const allowedOrigins = [
-  ...new Set([...defaultOrigins, ...configuredOrigins]),
-];
+  "https://fundsroom-operations-cloud.vercel.app",
+  ...envOrigins,
+]);
 
 app.use(
   cors({
     origin: (origin, callback) => {
       // Allow requests without an Origin header
-      // such as Postman, curl, server-to-server requests, etc.
+      // such as Postman, curl and server-to-server requests.
       if (!origin) {
         return callback(null, true);
       }
 
-      if (allowedOrigins.includes(origin)) {
+      if (allowedOrigins.has(origin)) {
         return callback(null, true);
       }
 
-      return callback(
-        new Error(`CORS blocked origin: ${origin}`)
-      );
+      console.log(`CORS blocked origin: ${origin}`);
+
+      return callback(null, false);
     },
 
     methods: [
@@ -87,18 +81,18 @@ app.use(
 );
 
 /*
-|--------------------------------------------------------------------------
-| Body parser
-|--------------------------------------------------------------------------
-*/
+ * -------------------------------------------------------
+ * BODY PARSING
+ * -------------------------------------------------------
+ */
 
 app.use(express.json());
 
 /*
-|--------------------------------------------------------------------------
-| Health check
-|--------------------------------------------------------------------------
-*/
+ * -------------------------------------------------------
+ * HEALTH CHECK
+ * -------------------------------------------------------
+ */
 
 app.get("/api/health", (_req, res) => {
   res.json({
@@ -109,10 +103,10 @@ app.get("/api/health", (_req, res) => {
 });
 
 /*
-|--------------------------------------------------------------------------
-| API Routes
-|--------------------------------------------------------------------------
-*/
+ * -------------------------------------------------------
+ * API ROUTES
+ * -------------------------------------------------------
+ */
 
 app.use("/api/auth", auth);
 
@@ -139,47 +133,29 @@ app.use("/api/audit", audit);
 app.use("/api/ai", ai);
 
 /*
-|--------------------------------------------------------------------------
-| Error handler
-|--------------------------------------------------------------------------
-*/
+ * -------------------------------------------------------
+ * ERROR HANDLER
+ * -------------------------------------------------------
+ */
 
 app.use(errorHandler);
 
 /*
-|--------------------------------------------------------------------------
-| Server
-|--------------------------------------------------------------------------
-*/
+ * -------------------------------------------------------
+ * START SERVER
+ * -------------------------------------------------------
+ */
 
 const port = Number(process.env.PORT) || 5000;
 
-/*
-|--------------------------------------------------------------------------
-| Database initialization → Demo seed → Start server
-|--------------------------------------------------------------------------
-*/
-
 initDb()
-  .then(() => seedDemoData())
+  .then(seedDemoData)
   .then(() => {
     app.listen(port, () => {
-      console.log(`Fundsroom API running on ${port}`);
-      console.log(`Allowed CORS origins:`);
-      allowedOrigins.forEach((origin) => {
-        console.log(`  ✓ ${origin}`);
-      });
+      console.log(`Fundsroom API running on port ${port}`);
     });
   })
-  .catch((error: unknown) => {
-    console.error("Failed to start Fundsroom API:");
-
-    if (error instanceof Error) {
-      console.error(error.message);
-      console.error(error.stack);
-    } else {
-      console.error(error);
-    }
-
+  .catch((e: unknown) => {
+    console.error("Failed to start Fundsroom API:", e);
     process.exit(1);
   });
